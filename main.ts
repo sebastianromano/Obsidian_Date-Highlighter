@@ -1,56 +1,150 @@
-import { App, Plugin, PluginSettingTab, Setting, TFile, TAbstractFile, MarkdownView, ColorComponent } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, TFile, MarkdownView } from 'obsidian';
 import { ViewPlugin, DecorationSet, Decoration, ViewUpdate, EditorView } from '@codemirror/view';
-import { syntaxTree } from '@codemirror/language';
 import { RangeSetBuilder } from '@codemirror/state';
 import { moment } from 'obsidian';
+
+// Enums for better type safety and maintainability
+enum DateCategory {
+	Recent = 'recent',
+	Intermediate = 'intermediate',
+	Old = 'old'
+}
 
 interface DateHighlighterSettings {
 	highlightInlineContent: boolean;
 	highlightFilenames: boolean;
-	recentColor: string;
-	intermediateColor: string;
-	oldColor: string;
-	recentDays: number;
-	intermediateDays: number;
+	colors: {
+		[DateCategory.Recent]: string;
+		[DateCategory.Intermediate]: string;
+		[DateCategory.Old]: string;
+	};
+	periods: {
+		recent: number;
+		intermediate: number;
+	};
 	textColor: string;
 }
 
 const DEFAULT_SETTINGS: DateHighlighterSettings = {
 	highlightInlineContent: true,
 	highlightFilenames: true,
-	recentColor: '#a4e7c3',
-	intermediateColor: '#e7dba4',
-	oldColor: '#e7a4a4',
-	recentDays: 14,
-	intermediateDays: 30,
+	colors: {
+		[DateCategory.Recent]: '#a4e7c3',
+		[DateCategory.Intermediate]: '#e7dba4',
+		[DateCategory.Old]: '#e7a4a4'
+	},
+	periods: {
+		recent: 14,
+		intermediate: 30
+	},
 	textColor: '#000000'
+};
+
+// Date format configuration for better maintainability
+const DATE_FORMATS = {
+	patterns: [
+		/\d{4}-\d{2}-\d{2}/g,    // YYYY-MM-DD
+		/\d{2}\/\d{2}\/\d{4}/g,  // MM/DD/YYYY
+		/\d{2}-\d{2}-\d{4}/g,    // DD-MM-YYYY
+		/\d{4}\.\d{2}\.\d{2}/g   // YYYY.MM.DD
+	],
+	momentFormats: ['YYYY-MM-DD', 'MM/DD/YYYY', 'DD-MM-YYYY', 'YYYY.MM.DD']
+};
+
+class DateService {
+	static parseDate(dateStr: string): moment.Moment | null {
+		for (const format of DATE_FORMATS.momentFormats) {
+			const parsed = moment(dateStr, format, true);
+			if (parsed.isValid()) {
+				return parsed;
+			}
+		}
+		return null;
+	}
+
+	static findDatesInText(text: string): string[] {
+		return DATE_FORMATS.patterns.flatMap(regex =>
+			text.match(regex) || []
+		);
+	}
+
+	static generateTooltip(dateStr: string): string {
+		const date = this.parseDate(dateStr);
+		if (!date) return '';
+
+		const now = moment();
+		const daysDiff = now.diff(date, 'days');
+
+		switch (daysDiff) {
+			case 0: return 'Today';
+			case 1: return 'Yesterday';
+			case -1: return 'Tomorrow';
+			default:
+				const daysText = Math.abs(daysDiff);
+				return daysDiff > 0
+					? `${daysText} days ago`
+					: `In ${daysText} days`;
+		}
+	}
+
+	static getHighlightColor(
+		dateStr: string,
+		settings: DateHighlighterSettings
+	): { bg: string; text: string } {
+		const date = this.parseDate(dateStr);
+		if (!date) return { bg: settings.colors[DateCategory.Old], text: settings.textColor };
+
+		const daysSince = moment().diff(date, 'days');
+
+		if (daysSince <= settings.periods.recent) {
+			return {
+				bg: settings.colors[DateCategory.Recent],
+				text: settings.textColor
+			};
+		}
+
+		if (daysSince <= settings.periods.intermediate) {
+			return {
+				bg: settings.colors[DateCategory.Intermediate],
+				text: settings.textColor
+			};
+		}
+
+		return {
+			bg: settings.colors[DateCategory.Old],
+			text: settings.textColor
+		};
+	}
 }
 
 export default class DateHighlighterPlugin extends Plugin {
 	settings: DateHighlighterSettings;
-	styleElement: HTMLStyleElement;
+	private styleElement: HTMLStyleElement;
 
 	async onload() {
 		await this.loadSettings();
+		this.initializePlugin();
+	}
 
+	private initializePlugin() {
 		this.addSettingTab(new DateHighlighterSettingTab(this.app, this));
+		this.registerEditorExtension([createDateHighlighter(this)]);
+		this.setupStyleElement();
+		this.registerEvents();
+	}
 
-		this.registerEditorExtension([dateHighlighter(this)]);
-
+	private setupStyleElement() {
 		this.styleElement = document.createElement('style');
 		document.head.appendChild(this.styleElement);
-
 		this.updateFileStyles();
 
-		this.registerEvent(
-			this.app.vault.on('rename', () => {
-				this.updateFileStyles();
-			})
-		);
+		this.register(() => this.styleElement.remove());
+	}
 
-		this.register(() => {
-			this.styleElement.remove();
-		});
+	private registerEvents() {
+		this.registerEvent(
+			this.app.vault.on('rename', () => this.updateFileStyles())
+		);
 	}
 
 	updateFileStyles() {
@@ -59,26 +153,27 @@ export default class DateHighlighterPlugin extends Plugin {
 			return;
 		}
 
-		let styleContent = '';
-		const files = this.app.vault.getFiles();
+		const styleContent = this.generateFileStyles();
+		this.styleElement.textContent = styleContent;
+	}
 
-		files.forEach(file => {
-			const dates = findDatesInText(file.name);
-			if (dates.length > 0) {
-				const dateStr = dates[0];
-				const colors = getHighlightColor(dateStr, this.settings);
+	private generateFileStyles(): string {
+		return this.app.vault.getFiles()
+			.map(file => {
+				const dates = DateService.findDatesInText(file.path);
+				if (!dates.length) return '';
+
+				const colors = DateService.getHighlightColor(dates[0], this.settings);
 				const safeFileName = CSS.escape(file.path);
 
-				styleContent += `
-                    .nav-file-title[data-path="${safeFileName}"] {
-                        background-color: ${colors.bg} !important;
-                        color: ${colors.text} !important;
-                    }
-                `;
-			}
-		});
-
-		this.styleElement.textContent = styleContent;
+				return `
+          .nav-file-title[data-path="${safeFileName}"] {
+            background-color: ${colors.bg} !important;
+            color: ${colors.text} !important;
+          }
+        `;
+			})
+			.join('');
 	}
 
 	async loadSettings() {
@@ -91,12 +186,12 @@ export default class DateHighlighterPlugin extends Plugin {
 		this.refreshActiveEditors();
 	}
 
-	refreshActiveEditors() {
+	private refreshActiveEditors() {
 		this.app.workspace.getLeavesOfType('markdown').forEach(leaf => {
 			const view = leaf.view as MarkdownView;
-			if (view?.editor?.cm) {
-				// @ts-ignore
-				const cm6 = view.editor.cm;
+			// Access the editor's CM instance safely using the modern approach
+			if (view?.editor && 'cm' in view.editor) {
+				const cm6 = (view.editor as any).cm as EditorView;
 				cm6.dispatch({});
 			}
 		});
@@ -104,17 +199,21 @@ export default class DateHighlighterPlugin extends Plugin {
 }
 
 class DateHighlighterSettingTab extends PluginSettingTab {
-	plugin: DateHighlighterPlugin;
-
-	constructor(app: App, plugin: DateHighlighterPlugin) {
+	constructor(app: App, private plugin: DateHighlighterPlugin) {
 		super(app, plugin);
-		this.plugin = plugin;
 	}
 
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
 
+		this.createGeneralSettings();
+		this.createTimePeriodSettings();
+		this.createColorSettings();
+	}
+
+	private createGeneralSettings() {
+		const { containerEl } = this;
 		containerEl.createEl('h2', { text: 'Date Highlighter Settings' });
 
 		new Setting(containerEl)
@@ -136,18 +235,21 @@ class DateHighlighterSettingTab extends PluginSettingTab {
 					this.plugin.settings.highlightFilenames = value;
 					await this.plugin.saveSettings();
 				}));
+	}
 
+	private createTimePeriodSettings() {
+		const { containerEl } = this;
 		containerEl.createEl('h3', { text: 'Time Periods' });
 
 		new Setting(containerEl)
 			.setName('Recent period (days)')
 			.setDesc('Number of days to consider as recent (green)')
 			.addText(text => text
-				.setValue(this.plugin.settings.recentDays.toString())
+				.setValue(this.plugin.settings.periods.recent.toString())
 				.onChange(async (value) => {
 					const numValue = parseInt(value);
 					if (!isNaN(numValue) && numValue > 0) {
-						this.plugin.settings.recentDays = numValue;
+						this.plugin.settings.periods.recent = numValue;
 						await this.plugin.saveSettings();
 					}
 				}));
@@ -156,46 +258,37 @@ class DateHighlighterSettingTab extends PluginSettingTab {
 			.setName('Intermediate period (days)')
 			.setDesc('Number of days to consider as intermediate (yellow)')
 			.addText(text => text
-				.setValue(this.plugin.settings.intermediateDays.toString())
+				.setValue(this.plugin.settings.periods.intermediate.toString())
 				.onChange(async (value) => {
 					const numValue = parseInt(value);
-					if (!isNaN(numValue) && numValue > this.plugin.settings.recentDays) {
-						this.plugin.settings.intermediateDays = numValue;
+					if (!isNaN(numValue) && numValue > this.plugin.settings.periods.recent) {
+						this.plugin.settings.periods.intermediate = numValue;
 						await this.plugin.saveSettings();
 					}
 				}));
+	}
 
+	private createColorSettings() {
+		const { containerEl } = this;
 		containerEl.createEl('h3', { text: 'Colors' });
 
-		new Setting(containerEl)
-			.setName('Recent color')
-			.setDesc('Color for recent dates')
-			.addColorPicker(color => color
-				.setValue(this.plugin.settings.recentColor)
-				.onChange(async (value) => {
-					this.plugin.settings.recentColor = value;
-					await this.plugin.saveSettings();
-				}));
+		const colorSettings = [
+			{ key: DateCategory.Recent, name: 'Recent color', desc: 'Color for recent dates' },
+			{ key: DateCategory.Intermediate, name: 'Intermediate color', desc: 'Color for intermediate dates' },
+			{ key: DateCategory.Old, name: 'Old color', desc: 'Color for old dates' }
+		];
 
-		new Setting(containerEl)
-			.setName('Intermediate color')
-			.setDesc('Color for intermediate dates')
-			.addColorPicker(color => color
-				.setValue(this.plugin.settings.intermediateColor)
-				.onChange(async (value) => {
-					this.plugin.settings.intermediateColor = value;
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName('Old color')
-			.setDesc('Color for old dates')
-			.addColorPicker(color => color
-				.setValue(this.plugin.settings.oldColor)
-				.onChange(async (value) => {
-					this.plugin.settings.oldColor = value;
-					await this.plugin.saveSettings();
-				}));
+		colorSettings.forEach(({ key, name, desc }) => {
+			new Setting(containerEl)
+				.setName(name)
+				.setDesc(desc)
+				.addColorPicker(color => color
+					.setValue(this.plugin.settings.colors[key])
+					.onChange(async (value) => {
+						this.plugin.settings.colors[key] = value;
+						await this.plugin.saveSettings();
+					}));
+		});
 
 		new Setting(containerEl)
 			.setName('Text color')
@@ -209,126 +302,58 @@ class DateHighlighterSettingTab extends PluginSettingTab {
 	}
 }
 
-// Combined regex for multiple date formats
-const DATE_FORMATS = [
-	/\d{4}-\d{2}-\d{2}/g,  // YYYY-MM-DD
-	/\d{2}\/\d{2}\/\d{4}/g, // MM/DD/YYYY
-	/\d{2}-\d{2}-\d{4}/g,  // DD-MM-YYYY
-	/\d{4}\.\d{2}\.\d{2}/g  // YYYY.MM.DD
-];
+const createDateHighlighter = (plugin: DateHighlighterPlugin) =>
+	ViewPlugin.fromClass(
+		class {
+			decorations: DecorationSet;
 
-function parseDate(dateStr: string): moment.Moment | null {
-	const formats = ['YYYY-MM-DD', 'MM/DD/YYYY', 'DD-MM-YYYY', 'YYYY.MM.DD'];
-	for (const format of formats) {
-		const parsed = moment(dateStr, format, true);
-		if (parsed.isValid()) {
-			return parsed;
-		}
-	}
-	return null;
-}
+			constructor(view: EditorView) {
+				this.decorations = this.buildDecorations(view);
+			}
 
-function findDatesInText(text: string): string[] {
-	const dates: string[] = [];
-	for (const regex of DATE_FORMATS) {
-		const matches = text.match(regex);
-		if (matches) {
-			dates.push(...matches);
-		}
-	}
-	return dates;
-}
-
-function generateDateTooltip(dateStr: string): string {
-	const date = parseDate(dateStr);
-	if (!date) return '';
-
-	const now = moment();
-	const daysDiff = now.diff(date, 'days');
-	const daysText = Math.abs(daysDiff);
-
-	if (daysDiff === 0) return 'Today';
-	if (daysDiff === 1) return 'Yesterday';
-	if (daysDiff === -1) return 'Tomorrow';
-
-	return daysDiff > 0
-		? `${daysText} days ago`
-		: `In ${daysText} days`;
-}
-
-function getHighlightColor(dateStr: string, settings: DateHighlighterSettings): { bg: string, text: string } {
-	const date = parseDate(dateStr);
-	if (!date) return { bg: settings.oldColor, text: settings.textColor };
-
-	const today = moment();
-	const daysSince = today.diff(date, 'days');
-
-	if (daysSince <= settings.recentDays) {
-		return {
-			bg: settings.recentColor,
-			text: settings.textColor
-		};
-	} else if (daysSince <= settings.intermediateDays) {
-		return {
-			bg: settings.intermediateColor,
-			text: settings.textColor
-		};
-	} else {
-		return {
-			bg: settings.oldColor,
-			text: settings.textColor
-		};
-	}
-}
-
-const dateHighlighter = (plugin: DateHighlighterPlugin) => ViewPlugin.fromClass(class {
-	decorations: DecorationSet;
-
-	constructor(view: EditorView) {
-		this.decorations = this.buildDecorations(view);
-	}
-
-	update(update: ViewUpdate) {
-		if (update.docChanged || update.viewportChanged) {
-			this.decorations = this.buildDecorations(update.view);
-		}
-	}
-
-	buildDecorations(view: EditorView) {
-		if (!plugin.settings.highlightInlineContent) {
-			return Decoration.none;
-		}
-
-		const builder = new RangeSetBuilder<Decoration>();
-
-		for (let { from, to } of view.visibleRanges) {
-			const text = view.state.doc.sliceString(from, to);
-
-			for (const regex of DATE_FORMATS) {
-				let match;
-				while ((match = regex.exec(text)) !== null) {
-					const dateStr = match[0];
-					const start = from + match.index;
-					const end = start + dateStr.length;
-					const colors = getHighlightColor(dateStr, plugin.settings);
-					const tooltip = generateDateTooltip(dateStr);
-
-					builder.add(
-						start,
-						end,
-						Decoration.mark({
-							attributes: {
-								style: `background-color: ${colors.bg}; color: ${colors.text};`,
-								title: tooltip
-							}
-						})
-					);
+			update(update: ViewUpdate) {
+				if (update.docChanged || update.viewportChanged) {
+					this.decorations = this.buildDecorations(update.view);
 				}
 			}
-		}
 
-		return builder.finish();
-	}
-}, {
-	decorations: v => v.decorations
-});
+			buildDecorations(view: EditorView) {
+				if (!plugin.settings.highlightInlineContent) {
+					return Decoration.none;
+				}
+
+				const builder = new RangeSetBuilder<Decoration>();
+
+				for (let { from, to } of view.visibleRanges) {
+					const text = view.state.doc.sliceString(from, to);
+
+					DATE_FORMATS.patterns.forEach(regex => {
+						let match;
+						while ((match = regex.exec(text)) !== null) {
+							const dateStr = match[0];
+							const start = from + match.index;
+							const end = start + dateStr.length;
+							const colors = DateService.getHighlightColor(dateStr, plugin.settings);
+							const tooltip = DateService.generateTooltip(dateStr);
+
+							builder.add(
+								start,
+								end,
+								Decoration.mark({
+									attributes: {
+										style: `background-color: ${colors.bg}; color: ${colors.text};`,
+										title: tooltip
+									}
+								})
+							);
+						}
+					});
+				}
+
+				return builder.finish();
+			}
+		},
+		{
+			decorations: v => v.decorations
+		}
+	);

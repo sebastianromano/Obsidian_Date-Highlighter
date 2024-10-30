@@ -1,0 +1,38 @@
+/* Folder select modal */
+.folder-select-form {
+    max-height: 400px;
+    overflow-y: auto;
+    margin: 1em 0;
+}
+
+/* Settings styling */
+.setting-item-description {
+    color: var(--text-muted);
+    font-size: 0.8em;
+    margin: 0.5em 0;
+}
+
+/* Color preview in settings */
+.color-preview {
+    width: 20px;
+    height: 20px;
+    border-radius: 3px;
+    border: 1px solid var(--background-modifier-border);
+    display: inline-block;
+    vertical-align: middle;
+    margin-right: 8px;
+}
+
+/* Modal buttons */
+.modal-button-container {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 1em;
+}
+
+/* Date highlight hover effects */
+.cm-line .date-highlight:hover {
+    filter: brightness(0.95);
+    transition: filter 0.2s ease;
+}
